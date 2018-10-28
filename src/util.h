@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2017 The Bitcoin Core developers
+// Copyright (c) 2009-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -19,45 +19,37 @@
 #include <logging.h>
 #include <sync.h>
 #include <tinyformat.h>
+#include <utilmemory.h>
 #include <utiltime.h>
 
 #include <atomic>
 #include <exception>
 #include <map>
-#include <memory>
 #include <set>
 #include <stdint.h>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include <boost/signals2/signal.hpp>
 #include <boost/thread/condition_variable.hpp> // for boost::thread_interrupted
 
 // Application startup time (used for uptime calculation)
 int64_t GetStartupTime();
 
-/** Signals for translation. */
-class CTranslationInterface
-{
-public:
-    /** Translate a message to the native language of the user. */
-    boost::signals2::signal<std::string (const char* psz)> Translate;
-};
-
-extern CTranslationInterface translationInterface;
-
 extern const char * const BITCOIN_CONF_FILENAME;
 extern const char * const BITCOIN_PID_FILENAME;
 
+/** Translate a message to the native language of the user. */
+const extern std::function<std::string(const char*)> G_TRANSLATION_FUN;
+
 /**
- * Translation function: Call Translate signal on UI interface, which returns a boost::optional result.
- * If no translation slot is registered, nothing is returned, and simply return the input.
+ * Translation function.
+ * If no translation function is set, simply return the input.
  */
 inline std::string _(const char* psz)
 {
-    boost::optional<std::string> rv = translationInterface.Translate(psz);
-    return rv ? (*rv) : psz;
+    return G_TRANSLATION_FUN ? (G_TRANSLATION_FUN)(psz) : psz;
 }
 
 void SetupEnvironment();
@@ -66,12 +58,12 @@ bool SetupNetworking();
 template<typename... Args>
 bool error(const char* fmt, const Args&... args)
 {
-    LogPrintStr("ERROR: " + tfm::format(fmt, args...) + "\n");
+    LogPrintf("ERROR: %s\n", tfm::format(fmt, args...));
     return false;
 }
 
 void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
-void FileCommit(FILE *file);
+bool FileCommit(FILE *file);
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
@@ -118,18 +110,46 @@ inline bool IsSwitchChar(char c)
 #endif
 }
 
+enum class OptionsCategory {
+    OPTIONS,
+    CONNECTION,
+    WALLET,
+    WALLET_DEBUG_TEST,
+    ZMQ,
+    DEBUG_TEST,
+    CHAINPARAMS,
+    NODE_RELAY,
+    BLOCK_CREATION,
+    RPC,
+    GUI,
+    COMMANDS,
+    REGISTER_COMMANDS,
+
+    HIDDEN // Always the last option to avoid printing these in the help
+};
+
 class ArgsManager
 {
 protected:
     friend class ArgsManagerHelper;
 
-    mutable CCriticalSection cs_args;
-    std::map<std::string, std::vector<std::string>> m_override_args;
-    std::map<std::string, std::vector<std::string>> m_config_args;
-    std::string m_network;
-    std::set<std::string> m_network_only_args;
+    struct Arg
+    {
+        std::string m_help_param;
+        std::string m_help_text;
+        bool m_debug_only;
 
-    void ReadConfigStream(std::istream& stream);
+        Arg(const std::string& help_param, const std::string& help_text, bool debug_only) : m_help_param(help_param), m_help_text(help_text), m_debug_only(debug_only) {};
+    };
+
+    mutable CCriticalSection cs_args;
+    std::map<std::string, std::vector<std::string>> m_override_args GUARDED_BY(cs_args);
+    std::map<std::string, std::vector<std::string>> m_config_args GUARDED_BY(cs_args);
+    std::string m_network GUARDED_BY(cs_args);
+    std::set<std::string> m_network_only_args GUARDED_BY(cs_args);
+    std::map<OptionsCategory, std::map<std::string, Arg>> m_available_args GUARDED_BY(cs_args);
+
+    bool ReadConfigStream(std::istream& stream, std::string& error, bool ignore_invalid_keys = false);
 
 public:
     ArgsManager();
@@ -139,8 +159,8 @@ public:
      */
     void SelectConfigNetwork(const std::string& network);
 
-    void ParseParameters(int argc, const char*const argv[]);
-    void ReadConfigFile(const std::string& confPath);
+    bool ParseParameters(int argc, const char* const argv[], std::string& error);
+    bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
 
     /**
      * Log warnings for options in m_section_only_args when
@@ -229,6 +249,34 @@ public:
      * @return CBaseChainParams::MAIN by default; raises runtime error if an invalid combination is given.
      */
     std::string GetChainName() const;
+
+    /**
+     * Add argument
+     */
+    void AddArg(const std::string& name, const std::string& help, const bool debug_only, const OptionsCategory& cat);
+
+    /**
+     * Add many hidden arguments
+     */
+    void AddHiddenArgs(const std::vector<std::string>& args);
+
+    /**
+     * Clear available arguments
+     */
+    void ClearArgs() {
+        LOCK(cs_args);
+        m_available_args.clear();
+    }
+
+    /**
+     * Get the help string
+     */
+    std::string GetHelpMessage() const;
+
+    /**
+     * Check whether we know of this arg
+     */
+    bool IsArgKnown(const std::string& key) const;
 };
 
 extern ArgsManager gArgs;
@@ -293,20 +341,42 @@ template <typename Callable> void TraceThread(const char* name,  Callable func)
 
 std::string CopyrightHolders(const std::string& strPrefix);
 
-//! Substitute for C++14 std::make_unique.
-template <typename T, typename... Args>
-std::unique_ptr<T> MakeUnique(Args&&... args)
-{
-    return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-}
-
 /**
  * On platforms that support it, tell the kernel the calling thread is
  * CPU-intensive and non-interactive. See SCHED_BATCH in sched(7) for details.
  *
  * @return The return value of sched_setschedule(), or 1 on systems without
- * sched_setchedule().
+ * sched_setschedule().
  */
-int ScheduleBatchPriority(void);
+int ScheduleBatchPriority();
+
+namespace util {
+
+//! Simplification of std insertion
+template <typename Tdst, typename Tsrc>
+inline void insert(Tdst& dst, const Tsrc& src) {
+    dst.insert(dst.begin(), src.begin(), src.end());
+}
+template <typename TsetT, typename Tsrc>
+inline void insert(std::set<TsetT>& dst, const Tsrc& src) {
+    dst.insert(src.begin(), src.end());
+}
+
+#ifdef WIN32
+class WinCmdLineArgs
+{
+public:
+    WinCmdLineArgs();
+    ~WinCmdLineArgs();
+    std::pair<int, char**> get();
+
+private:
+    int argc;
+    char** argv;
+    std::vector<std::string> args;
+};
+#endif
+
+} // namespace util
 
 #endif // BITCOIN_UTIL_H

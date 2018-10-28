@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2017 The Bitcoin Core developers
+// Copyright (c) 2011-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -17,6 +17,7 @@
 #include <interfaces/node.h>
 #include <validation.h>
 #include <net.h>
+#include <netbase.h>
 #include <txmempool.h>
 #include <ui_interface.h>
 #include <util.h>
@@ -26,8 +27,6 @@
 
 #include <QDebug>
 #include <QTimer>
-
-class CBlockIndex;
 
 static int64_t nLastHeaderTipUpdateNotification = 0;
 static int64_t nLastBlockTipUpdateNotification = 0;
@@ -45,7 +44,7 @@ ClientModel::ClientModel(interfaces::Node& node, OptionsModel *_optionsModel, QO
     peerTableModel = new PeerTableModel(m_node, this);
     banTableModel = new BanTableModel(m_node, this);
     pollTimer = new QTimer(this);
-    connect(pollTimer, SIGNAL(timeout()), this, SLOT(updateTimer()));
+    connect(pollTimer, &QTimer::timeout, this, &ClientModel::updateTimer);
     pollTimer->start(MODEL_UPDATE_DELAY);
 
     subscribeToCoreSignals();
@@ -178,6 +177,11 @@ QString ClientModel::dataDir() const
     return GUIUtil::boostPathToQString(GetDataDir());
 }
 
+QString ClientModel::blocksDir() const
+{
+    return GUIUtil::boostPathToQString(GetBlocksDir());
+}
+
 void ClientModel::updateBanlist()
 {
     banTableModel->refresh();
@@ -267,4 +271,14 @@ void ClientModel::unsubscribeFromCoreSignals()
     m_handler_banned_list_changed->disconnect();
     m_handler_notify_block_tip->disconnect();
     m_handler_notify_header_tip->disconnect();
+}
+
+bool ClientModel::getProxyInfo(std::string& ip_port) const
+{
+    proxyType ipv4, ipv6;
+    if (m_node.getProxy((Network) 1, ipv4) && m_node.getProxy((Network) 2, ipv6)) {
+      ip_port = ipv4.proxy.ToStringIPPort();
+      return true;
+    }
+    return false;
 }

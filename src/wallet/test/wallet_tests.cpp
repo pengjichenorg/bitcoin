@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2017 The Bitcoin Core developers
+// Copyright (c) 2012-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -73,8 +73,8 @@ BOOST_FIXTURE_TEST_CASE(rescan, TestChain100Setup)
     // before the missing block, and success for a key whose creation time is
     // after.
     {
-        CWallet wallet("dummy", WalletDatabase::CreateDummy());
-        vpwallets.insert(vpwallets.begin(), &wallet);
+        std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>("dummy", WalletDatabase::CreateDummy());
+        AddWallet(wallet);
         UniValue keys;
         keys.setArray();
         UniValue key;
@@ -105,7 +105,7 @@ BOOST_FIXTURE_TEST_CASE(rescan, TestChain100Setup)
                       "downloading and rescanning the relevant blocks (see -reindex and -rescan "
                       "options).\"}},{\"success\":true}]",
                               0, oldTip->GetBlockTimeMax(), TIMESTAMP_WINDOW));
-        vpwallets.erase(vpwallets.begin());
+        RemoveWallet(wallet);
     }
 }
 
@@ -130,38 +130,40 @@ BOOST_FIXTURE_TEST_CASE(importwallet_rescan, TestChain100Setup)
 
     LOCK(cs_main);
 
+    std::string backup_file = (SetDataDir("importwallet_rescan") / "wallet.backup").string();
+
     // Import key into wallet and call dumpwallet to create backup file.
     {
-        CWallet wallet("dummy", WalletDatabase::CreateDummy());
-        LOCK(wallet.cs_wallet);
-        wallet.mapKeyMetadata[coinbaseKey.GetPubKey().GetID()].nCreateTime = KEY_TIME;
-        wallet.AddKeyPubKey(coinbaseKey, coinbaseKey.GetPubKey());
+        std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>("dummy", WalletDatabase::CreateDummy());
+        LOCK(wallet->cs_wallet);
+        wallet->mapKeyMetadata[coinbaseKey.GetPubKey().GetID()].nCreateTime = KEY_TIME;
+        wallet->AddKeyPubKey(coinbaseKey, coinbaseKey.GetPubKey());
 
         JSONRPCRequest request;
         request.params.setArray();
-        request.params.push_back((pathTemp / "wallet.backup").string());
-        vpwallets.insert(vpwallets.begin(), &wallet);
+        request.params.push_back(backup_file);
+        AddWallet(wallet);
         ::dumpwallet(request);
-        vpwallets.erase(vpwallets.begin());
+        RemoveWallet(wallet);
     }
 
     // Call importwallet RPC and verify all blocks with timestamps >= BLOCK_TIME
     // were scanned, and no prior blocks were scanned.
     {
-        CWallet wallet("dummy", WalletDatabase::CreateDummy());
+        std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>("dummy", WalletDatabase::CreateDummy());
 
         JSONRPCRequest request;
         request.params.setArray();
-        request.params.push_back((pathTemp / "wallet.backup").string());
-        vpwallets.insert(vpwallets.begin(), &wallet);
+        request.params.push_back(backup_file);
+        AddWallet(wallet);
         ::importwallet(request);
-        vpwallets.erase(vpwallets.begin());
+        RemoveWallet(wallet);
 
-        LOCK(wallet.cs_wallet);
-        BOOST_CHECK_EQUAL(wallet.mapWallet.size(), 3U);
+        LOCK(wallet->cs_wallet);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.size(), 3U);
         BOOST_CHECK_EQUAL(m_coinbase_txns.size(), 103U);
         for (size_t i = 0; i < m_coinbase_txns.size(); ++i) {
-            bool found = wallet.GetWalletTx(m_coinbase_txns[i]->GetHash());
+            bool found = wallet->GetWalletTx(m_coinbase_txns[i]->GetHash());
             bool expected = i >= 100;
             BOOST_CHECK_EQUAL(found, expected);
         }
@@ -295,7 +297,7 @@ public:
         CCoinControl dummy;
         BOOST_CHECK(wallet->CreateTransaction({recipient}, tx, reservekey, fee, changePos, error, dummy));
         CValidationState state;
-        BOOST_CHECK(wallet->CommitTransaction(tx, {}, {}, {}, reservekey, nullptr, state));
+        BOOST_CHECK(wallet->CommitTransaction(tx, {}, {}, reservekey, nullptr, state));
         CMutableTransaction blocktx;
         {
             LOCK(wallet->cs_wallet);
@@ -318,7 +320,11 @@ BOOST_FIXTURE_TEST_CASE(ListCoins, ListCoinsTestingSetup)
 
     // Confirm ListCoins initially returns 1 coin grouped under coinbaseKey
     // address.
-    auto list = wallet->ListCoins();
+    std::map<CTxDestination, std::vector<COutput>> list;
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        list = wallet->ListCoins();
+    }
     BOOST_CHECK_EQUAL(list.size(), 1U);
     BOOST_CHECK_EQUAL(boost::get<CKeyID>(list.begin()->first).ToString(), coinbaseAddress);
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 1U);
@@ -331,7 +337,10 @@ BOOST_FIXTURE_TEST_CASE(ListCoins, ListCoinsTestingSetup)
     // coinbaseKey pubkey, even though the change address has a different
     // pubkey.
     AddTx(CRecipient{GetScriptForRawPubKey({}), 1 * COIN, false /* subtract fee */});
-    list = wallet->ListCoins();
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        list = wallet->ListCoins();
+    }
     BOOST_CHECK_EQUAL(list.size(), 1U);
     BOOST_CHECK_EQUAL(boost::get<CKeyID>(list.begin()->first).ToString(), coinbaseAddress);
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 2U);
@@ -357,10 +366,22 @@ BOOST_FIXTURE_TEST_CASE(ListCoins, ListCoinsTestingSetup)
     }
     // Confirm ListCoins still returns same result as before, despite coins
     // being locked.
-    list = wallet->ListCoins();
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        list = wallet->ListCoins();
+    }
     BOOST_CHECK_EQUAL(list.size(), 1U);
     BOOST_CHECK_EQUAL(boost::get<CKeyID>(list.begin()->first).ToString(), coinbaseAddress);
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(wallet_disableprivkeys, TestChain100Setup)
+{
+    std::shared_ptr<CWallet> wallet = std::make_shared<CWallet>("dummy", WalletDatabase::CreateDummy());
+    wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    BOOST_CHECK(!wallet->TopUpKeyPool(1000));
+    CPubKey pubkey;
+    BOOST_CHECK(!wallet->GetKeyFromPool(pubkey, false));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

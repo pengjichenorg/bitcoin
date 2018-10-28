@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 The Bitcoin Core developers
+// Copyright (c) 2014-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -312,7 +312,7 @@ BOOST_AUTO_TEST_CASE(updatecoins_simulation_test)
                 if (InsecureRandRange(10) == 0 && coinbase_coins.size()) {
                     auto utxod = FindRandomFrom(coinbase_coins);
                     // Reuse the exact same coinbase
-                    tx = std::get<0>(utxod->second);
+                    tx = CMutableTransaction{std::get<0>(utxod->second)};
                     // shouldn't be available for reconnection if it's been duplicated
                     disconnected_coins.erase(utxod->first);
 
@@ -331,7 +331,7 @@ BOOST_AUTO_TEST_CASE(updatecoins_simulation_test)
                 // 1/20 times reconnect a previously disconnected tx
                 if (randiter % 20 == 2 && disconnected_coins.size()) {
                     auto utxod = FindRandomFrom(disconnected_coins);
-                    tx = std::get<0>(utxod->second);
+                    tx = CMutableTransaction{std::get<0>(utxod->second)};
                     prevout = tx.vin[0].prevout;
                     if (!CTransaction(tx).IsCoinBase() && !utxoset.count(prevout)) {
                         disconnected_coins.erase(utxod->first);
@@ -508,7 +508,7 @@ BOOST_AUTO_TEST_CASE(ccoins_serialization)
         Coin cc4;
         ss4 >> cc4;
         BOOST_CHECK_MESSAGE(false, "We should have thrown");
-    } catch (const std::ios_base::failure& e) {
+    } catch (const std::ios_base::failure&) {
     }
 
     // Very large scriptPubKey (3*10^9 bytes) past the end of the stream
@@ -521,7 +521,7 @@ BOOST_AUTO_TEST_CASE(ccoins_serialization)
         Coin cc5;
         ss5 >> cc5;
         BOOST_CHECK_MESSAGE(false, "We should have thrown");
-    } catch (const std::ios_base::failure& e) {
+    } catch (const std::ios_base::failure&) {
     }
 }
 
@@ -540,7 +540,7 @@ const static auto FLAGS = {char(0), FRESH, DIRTY, char(DIRTY | FRESH)};
 const static auto CLEAN_FLAGS = {char(0), FRESH};
 const static auto ABSENT_FLAGS = {NO_ENTRY};
 
-void SetCoinsValue(CAmount value, Coin& coin)
+static void SetCoinsValue(CAmount value, Coin& coin)
 {
     assert(value != ABSENT);
     coin.Clear();
@@ -552,7 +552,7 @@ void SetCoinsValue(CAmount value, Coin& coin)
     }
 }
 
-size_t InsertCoinsMapEntry(CCoinsMap& map, CAmount value, char flags)
+static size_t InsertCoinsMapEntry(CCoinsMap& map, CAmount value, char flags)
 {
     if (value == ABSENT) {
         assert(flags == NO_ENTRY);
@@ -605,7 +605,7 @@ public:
     CCoinsViewCacheTest cache{&base};
 };
 
-void CheckAccessCoin(CAmount base_value, CAmount cache_value, CAmount expected_value, char cache_flags, char expected_flags)
+static void CheckAccessCoin(CAmount base_value, CAmount cache_value, CAmount expected_value, char cache_flags, char expected_flags)
 {
     SingleEntryCacheTest test(base_value, cache_value, cache_flags);
     test.cache.AccessCoin(OUTPOINT);
@@ -656,7 +656,7 @@ BOOST_AUTO_TEST_CASE(ccoins_access)
     CheckAccessCoin(VALUE1, VALUE2, VALUE2, DIRTY|FRESH, DIRTY|FRESH);
 }
 
-void CheckSpendCoins(CAmount base_value, CAmount cache_value, CAmount expected_value, char cache_flags, char expected_flags)
+static void CheckSpendCoins(CAmount base_value, CAmount cache_value, CAmount expected_value, char cache_flags, char expected_flags)
 {
     SingleEntryCacheTest test(base_value, cache_value, cache_flags);
     test.cache.SpendCoin(OUTPOINT);
@@ -707,7 +707,7 @@ BOOST_AUTO_TEST_CASE(ccoins_spend)
     CheckSpendCoins(VALUE1, VALUE2, ABSENT, DIRTY|FRESH, NO_ENTRY   );
 }
 
-void CheckAddCoinBase(CAmount base_value, CAmount cache_value, CAmount modify_value, CAmount expected_value, char cache_flags, char expected_flags, bool coinbase)
+static void CheckAddCoinBase(CAmount base_value, CAmount cache_value, CAmount modify_value, CAmount expected_value, char cache_flags, char expected_flags, bool coinbase)
 {
     SingleEntryCacheTest test(base_value, cache_value, cache_flags);
 
@@ -719,7 +719,7 @@ void CheckAddCoinBase(CAmount base_value, CAmount cache_value, CAmount modify_va
         test.cache.AddCoin(OUTPOINT, Coin(std::move(output), 1, coinbase), coinbase);
         test.cache.SelfTest();
         GetCoinsMapEntry(test.cache.map(), result_value, result_flags);
-    } catch (std::logic_error& e) {
+    } catch (std::logic_error&) {
         result_value = FAIL;
         result_flags = NO_ENTRY;
     }
@@ -734,9 +734,9 @@ void CheckAddCoinBase(CAmount base_value, CAmount cache_value, CAmount modify_va
 // while still verifying that the CoinsViewCache::AddCoin implementation
 // ignores base values.
 template <typename... Args>
-void CheckAddCoin(Args&&... args)
+static void CheckAddCoin(Args&&... args)
 {
-    for (CAmount base_value : {ABSENT, PRUNED, VALUE1})
+    for (const CAmount base_value : {ABSENT, PRUNED, VALUE1})
         CheckAddCoinBase(base_value, std::forward<Args>(args)...);
 }
 
@@ -780,7 +780,7 @@ void CheckWriteCoins(CAmount parent_value, CAmount child_value, CAmount expected
         WriteCoinsViewEntry(test.cache, child_value, child_flags);
         test.cache.SelfTest();
         GetCoinsMapEntry(test.cache.map(), result_value, result_flags);
-    } catch (std::logic_error& e) {
+    } catch (std::logic_error&) {
         result_value = FAIL;
         result_flags = NO_ENTRY;
     }
@@ -848,10 +848,10 @@ BOOST_AUTO_TEST_CASE(ccoins_write)
     // they would be too repetitive (the parent cache is never updated in these
     // cases). The loop below covers these cases and makes sure the parent cache
     // is always left unchanged.
-    for (CAmount parent_value : {ABSENT, PRUNED, VALUE1})
-        for (CAmount child_value : {ABSENT, PRUNED, VALUE2})
-            for (char parent_flags : parent_value == ABSENT ? ABSENT_FLAGS : FLAGS)
-                for (char child_flags : child_value == ABSENT ? ABSENT_FLAGS : CLEAN_FLAGS)
+    for (const CAmount parent_value : {ABSENT, PRUNED, VALUE1})
+        for (const CAmount child_value : {ABSENT, PRUNED, VALUE2})
+            for (const char parent_flags : parent_value == ABSENT ? ABSENT_FLAGS : FLAGS)
+                for (const char child_flags : child_value == ABSENT ? ABSENT_FLAGS : CLEAN_FLAGS)
                     CheckWriteCoins(parent_value, child_value, parent_value, parent_flags, child_flags, parent_flags);
 }
 
